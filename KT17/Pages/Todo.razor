@@ -1,0 +1,192 @@
+@page "/todo"
+@using System.Text.Json
+@inject IJSRuntime JS
+
+<PageTitle>To-Do List</PageTitle>
+
+<h1>To-Do List</h1>
+
+<div class="add">
+    <input type="text" maxlength="100" placeholder="Что нужно сделать?"
+           @bind="_newTitle" @bind:event="oninput" @onkeydown="OnAddKey" />
+    <button class="btn" disabled="@(string.IsNullOrWhiteSpace(_newTitle))" @onclick="AddAsync">Добавить</button>
+</div>
+
+<div class="filters">
+    @foreach (var f in Enum.GetValues<Filter>())
+    {
+        <button class="@(_filter == f ? "chip active" : "chip")" @onclick="() => _filter = f">@FilterName(f)</button>
+    }
+</div>
+
+@if (!_loaded)
+{
+    <p class="hint">Загрузка…</p>
+}
+else if (_items.Count == 0)
+{
+    <p class="hint">Задач пока нет. Добавьте первую!</p>
+}
+else if (Filtered.Count == 0)
+{
+    <p class="hint">В этом разделе задач нет.</p>
+}
+else
+{
+    <ul class="todo">
+        @foreach (var t in Filtered)
+        {
+            <li @key="t.Id" class="@(t.IsDone ? "done" : null)">
+                <input type="checkbox" @bind="t.IsDone" @bind:after="SaveAsync" />
+
+                @if (_editingId == t.Id)
+                {
+                    <input class="edit" type="text" maxlength="100" @ref="_editInput"
+                           @bind="_editTitle" @bind:event="oninput" @onkeydown="OnEditKey" />
+                    <button class="icon" title="Сохранить" @onclick="SaveEditAsync">💾</button>
+                    <button class="icon" title="Отмена" @onclick="CancelEdit">✖</button>
+                }
+                else
+                {
+                    <span class="title" title="Двойной щелчок — редактировать" @ondblclick="() => StartEdit(t)">@t.Title</span>
+                    <button class="icon" title="Редактировать" @onclick="() => StartEdit(t)">✎</button>
+                    <button class="icon" title="Удалить" @onclick="() => DeleteAsync(t)">🗑</button>
+                }
+            </li>
+        }
+    </ul>
+}
+
+@if (_items.Count > 0)
+{
+    <div class="footer">
+        <span>Осталось: <b>@ActiveCount</b> из @_items.Count</span>
+        @if (_items.Any(i => i.IsDone))
+        {
+            <button class="btn secondary" @onclick="ClearDoneAsync">Очистить выполненные</button>
+        }
+    </div>
+}
+
+@code {
+    private const string StorageKey = "kt17.todos";
+
+    private enum Filter { All, Active, Done }
+
+    private List<TodoItem> _items = new();
+    private string _newTitle = "";
+    private Filter _filter = Filter.All;
+    private bool _loaded;
+
+    private Guid? _editingId;
+    private string _editTitle = "";
+    private bool _focusEdit;
+    private ElementReference _editInput;
+
+    private int ActiveCount => _items.Count(i => !i.IsDone);
+
+    private List<TodoItem> Filtered => _filter switch
+    {
+        Filter.Active => _items.Where(i => !i.IsDone).ToList(),
+        Filter.Done => _items.Where(i => i.IsDone).ToList(),
+        _ => _items
+    };
+
+    private static string FilterName(Filter f) => f switch
+    {
+        Filter.Active => "Активные",
+        Filter.Done => "Выполненные",
+        _ => "Все"
+    };
+
+    // ---- загрузка / сохранение в localStorage браузера ----
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            var json = await JS.InvokeAsync<string?>("localStorage.getItem", StorageKey);
+            if (!string.IsNullOrEmpty(json))
+                _items = JsonSerializer.Deserialize<List<TodoItem>>(json) ?? new();
+        }
+        catch (Exception ex) when (ex is JsonException or JSException)
+        {
+            _items = new();
+        }
+        _loaded = true;
+    }
+
+    private async Task SaveAsync()
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("localStorage.setItem", StorageKey, JsonSerializer.Serialize(_items));
+        }
+        catch (JSException) { }
+    }
+
+    // ---- добавление ----
+    private async Task OnAddKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await AddAsync();
+    }
+
+    private async Task AddAsync()
+    {
+        var title = _newTitle.Trim();
+        if (title.Length == 0) return;
+
+        _items.Add(new TodoItem { Title = title });
+        _newTitle = "";
+        await SaveAsync();
+    }
+
+    // ---- редактирование ----
+    private void StartEdit(TodoItem item)
+    {
+        _editingId = item.Id;
+        _editTitle = item.Title;
+        _focusEdit = true;
+    }
+
+    private async Task OnEditKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await SaveEditAsync();
+        else if (e.Key == "Escape") CancelEdit();
+    }
+
+    private async Task SaveEditAsync()
+    {
+        var title = _editTitle.Trim();
+        var item = _items.FirstOrDefault(i => i.Id == _editingId);
+        if (item is null || title.Length == 0) return;
+
+        item.Title = title;
+        _editingId = null;
+        await SaveAsync();
+    }
+
+    private void CancelEdit() => _editingId = null;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_focusEdit)
+        {
+            _focusEdit = false;
+            try { await _editInput.FocusAsync(); } catch (InvalidOperationException) { }
+        }
+    }
+
+    // ---- удаление ----
+    private async Task DeleteAsync(TodoItem item)
+    {
+        _items.Remove(item);
+        if (_editingId == item.Id) _editingId = null;
+        await SaveAsync();
+    }
+
+    private async Task ClearDoneAsync()
+    {
+        _items.RemoveAll(i => i.IsDone);
+        await SaveAsync();
+    }
+}
